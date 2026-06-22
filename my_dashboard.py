@@ -301,6 +301,33 @@ td:first-child { color: var(--text); font-weight: 500; }
 .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
 .legend-dot { width: 9px; height: 9px; border-radius: 3px; }
 
+/* ── Modal (native <dialog>) ───────────────────────────── */
+.modal {
+  border: 1px solid var(--border-strong); padding: 0; color: var(--text);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border-radius: var(--radius); width: min(92vw, 400px);
+  box-shadow: 0 30px 80px -20px rgba(0,0,0,0.85);
+}
+.modal::backdrop { background: rgba(5,7,10,0.62); backdrop-filter: blur(3px); }
+.modal form { padding: 22px; }
+.modal h3 { font-size: 16px; color: #fff; margin-bottom: 8px; letter-spacing: -0.01em; }
+.modal-desc { font-size: 12.5px; color: var(--text-3); line-height: 1.55; margin-bottom: 18px; }
+.modal-label { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); font-weight: 600; margin-bottom: 7px; }
+.modal-input { width: 100%; background: #0d1118; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 15px; padding: 11px 12px; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.modal-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(217,119,87,0.22); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.btn { font: inherit; font-size: 13px; font-weight: 600; padding: 9px 16px; border-radius: 9px; cursor: pointer; border: 1px solid transparent; transition: background 0.15s ease, border-color 0.15s ease, filter 0.15s ease, transform 0.08s ease; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:active { transform: translateY(1px); }
+.btn-ghost { background: transparent; color: var(--text-2); border-color: var(--border-strong); }
+.btn-ghost:hover { background: var(--surface-hover); color: var(--text); }
+.btn-primary { background: linear-gradient(180deg, var(--accent), var(--accent-strong)); color: #fff; }
+.btn-primary:hover { filter: brightness(1.08); }
+.modal[open] { animation: modalIn 0.18s cubic-bezier(0.22,1,0.36,1); }
+.modal[open]::backdrop { animation: backdropIn 0.18s ease; }
+@keyframes modalIn { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
+
 @media (max-width: 640px) {
   .panel-pad, .usage-bar-container { padding: 15px 16px; }
   .card .value { font-size: 23px; }
@@ -351,6 +378,19 @@ td:first-child { color: var(--text); font-weight: 500; }
   <div class="section-head"><h2 id="sessionTableTitle">Sessions</h2></div>
   <table id="sessionTable"></table>
 </div>
+
+<dialog id="goalModal" class="modal" aria-labelledby="goalModalTitle">
+  <form method="dialog" id="goalForm">
+    <h3 id="goalModalTitle">Set Daily Output Goal</h3>
+    <p class="modal-desc">A personal target for output tokens per day — it drives the progress bar. This is not a Claude plan limit, just your own benchmark.</p>
+    <label class="modal-label" for="goalInput">Output tokens per day</label>
+    <input id="goalInput" class="modal-input num-mono" type="number" min="1" step="1000" inputmode="numeric" required>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="goalCancel">Cancel</button>
+      <button type="submit" class="btn btn-primary">Save goal</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 // Personal daily output-token GOAL (not a real Claude plan limit). User-settable, persisted.
@@ -604,11 +644,37 @@ function initTabKeys() {
   });
 }
 
+let goalTrigger = null;
+
 function setGoal() {
-  const v = prompt('Set your daily output-token goal:', DAILY_LIMIT);
-  if (v === null) return;
+  const dlg = document.getElementById('goalModal');
+  const input = document.getElementById('goalInput');
+  input.value = DAILY_LIMIT;
+  goalTrigger = document.activeElement;  // to restore focus on close
+  if (typeof dlg.showModal === 'function') {
+    dlg.showModal();
+    input.focus(); input.select();
+  } else {
+    // Fallback for browsers without <dialog>
+    applyGoal(prompt('Daily output-token goal:', DAILY_LIMIT));
+  }
+}
+
+function applyGoal(v) {
+  if (v == null) return;
   const n = parseInt(String(v).replace(/[^0-9]/g, ''), 10);
   if (n > 0) { DAILY_LIMIT = n; localStorage.setItem('claudeDailyGoal', String(n)); render(); }
+}
+
+function initGoalModal() {
+  const dlg = document.getElementById('goalModal');
+  document.getElementById('goalForm').addEventListener('submit', () => {
+    applyGoal(document.getElementById('goalInput').value);  // method="dialog" closes it
+  });
+  document.getElementById('goalCancel').addEventListener('click', () => dlg.close());
+  // Click on the backdrop (outside the form) closes
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+  dlg.addEventListener('close', () => { if (goalTrigger && goalTrigger.focus) goalTrigger.focus(); });
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -867,6 +933,7 @@ window.addEventListener('resize', () => { if (DATA) render(); });
 selectedRange = localStorage.getItem('claudeRange') || selectedRange;
 buildRangeBar();
 initTabKeys();
+initGoalModal();
 loadData();
 setInterval(loadData, 30000);
 </script>
