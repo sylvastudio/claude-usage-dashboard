@@ -48,14 +48,22 @@ def cost_for(model, input_tok, output_tok, cache_read, cache_write):
 
 def get_data(db_path=DB_PATH):
     if not db_path.exists():
-        return {"error": "No database found. Run: python3 cli.py scan"}
+        return {"error": "No usage data found yet. Use Claude Code, then refresh — logs live in ~/.claude/projects."}
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
+    # Group by the server's LOCAL calendar day. Timestamps are stored as UTC; we
+    # treat them as naive and apply a fixed minute offset so day buckets match the
+    # user's wall clock (and the JS "resets at local midnight" countdown). Using a
+    # literal offset rather than 'localtime' keeps this correct across SQLite versions.
+    off = datetime.now().astimezone().utcoffset()
+    off_min = int(off.total_seconds() // 60) if off else 0
+    tz = f"{off_min} minutes"
+
     # Daily totals by model
     rows = conn.execute("""
-        SELECT date(timestamp) as day, model,
+        SELECT date(timestamp, :tz) as day, model,
                SUM(input_tokens) as input,
                SUM(output_tokens) as output,
                SUM(cache_read_tokens) as cache_read,
@@ -64,7 +72,7 @@ def get_data(db_path=DB_PATH):
         FROM turns
         GROUP BY day, model
         ORDER BY day
-    """).fetchall()
+    """, {"tz": tz}).fetchall()
 
     daily_by_model = [dict(r) for r in rows]
 
@@ -100,16 +108,16 @@ def get_data(db_path=DB_PATH):
 
     sessions = [dict(r) for r in rows]
 
-    # Today's totals
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # Today's totals (local calendar day, matching the daily grouping above)
+    today = datetime.now().strftime("%Y-%m-%d")
     row = conn.execute("""
         SELECT SUM(input_tokens) as input,
                SUM(output_tokens) as output,
                SUM(cache_read_tokens) as cache_read,
                SUM(cache_creation_tokens) as cache_write,
                COUNT(*) as turns
-        FROM turns WHERE date(timestamp) = ?
-    """, (today,)).fetchone()
+        FROM turns WHERE date(timestamp, :tz) = :today
+    """, {"tz": tz, "today": today}).fetchone()
 
     today_data = dict(row) if row else {}
 
@@ -120,6 +128,7 @@ def get_data(db_path=DB_PATH):
         "models_summary": models_summary,
         "sessions": sessions,
         "today": today_data,
+        "pricing": PRICING,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -131,143 +140,221 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Usage Dashboard</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: #0d1117;
-  color: #c9d1d9;
-  padding: 24px;
-  max-width: 1400px;
-  margin: 0 auto;
+:root {
+  --bg: #0a0c10;
+  --surface: #14181f;
+  --surface-2: #181d26;
+  --surface-hover: #1b212b;
+  --border: #232a35;
+  --border-strong: #2d3542;
+  --text: #e8eef5;
+  --text-2: #b3bdc9;
+  --text-3: #97a1b0;
+  --accent: #e0855f;
+  --accent-strong: #d97757;
+  --green: #4ade80;
+  --yellow: #e3b341;
+  --red: #f0625b;
+  --blue: #5b9bf7;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 8px 24px -14px rgba(0,0,0,0.7), 0 1px 0 rgba(255,255,255,0.03) inset;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
 }
-h1 { color: #f0f6fc; font-size: 24px; margin-bottom: 4px; }
-.subtitle { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  font-family: var(--sans);
+  background:
+    radial-gradient(1100px 520px at 78% -12%, rgba(217,119,87,0.10), transparent 62%),
+    radial-gradient(900px 500px at 0% 0%, rgba(91,155,247,0.05), transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  padding: clamp(16px, 3vw, 32px);
+  max-width: 1320px;
+  margin: 0 auto;
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+}
+.num-mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ── Top bar ───────────────────────────────────────────── */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 13px; }
+.brand-mark {
+  width: 40px; height: 40px; border-radius: 11px;
+  display: grid; place-items: center;
+  background: linear-gradient(145deg, var(--accent), var(--accent-strong));
+  box-shadow: 0 6px 18px -8px rgba(217,119,87,0.7);
+  flex: none;
+}
+.brand-mark svg { width: 22px; height: 22px; display: block; }
+h1 { color: #fff; font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+.subtitle { color: var(--text-3); font-size: 12.5px; margin-top: 1px; }
+.live {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border);
+  padding: 6px 12px; border-radius: 999px;
+}
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 0 rgba(74,222,128,0.5); animation: pulse 2.4s ease-out infinite; transition: background 0.2s ease; }
+.live-dot.ok { background: var(--green); }
+.live-dot.refreshing { background: var(--yellow); animation: none; box-shadow: 0 0 6px 1px rgba(227,179,65,0.5); }
+.live-dot.error { background: var(--red); animation: none; box-shadow: 0 0 6px 1px rgba(240,98,91,0.5); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(74,222,128,0.5); } 70% { box-shadow: 0 0 0 7px rgba(74,222,128,0); } 100% { box-shadow: 0 0 0 0 rgba(74,222,128,0); } }
+.group-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ── Panels (shared surface) ───────────────────────────── */
+.panel {
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.panel-pad { padding: 20px 22px; }
+.section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+h2 { color: #fff; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
 
 /* ── Usage bar ─────────────────────────────────────────── */
-.usage-bar-container {
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 10px;
-  padding: 16px 20px;
-  margin-bottom: 20px;
-}
-.usage-bar-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-}
-.usage-bar-title { color: #f0f6fc; font-size: 14px; font-weight: 600; }
-.usage-bar-pct { color: #f0f6fc; font-size: 22px; font-weight: 700; }
-.usage-bar-track {
-  width: 100%;
-  height: 12px;
-  background: #21262d;
-  border-radius: 6px;
-  overflow: hidden;
-}
-.usage-bar-fill {
-  height: 100%;
-  border-radius: 6px;
-  transition: width 0.5s ease;
-}
-.usage-bar-details {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 8px;
-  font-size: 12px;
-  color: #8b949e;
-}
-.usage-bar-details .used { color: #c9d1d9; }
+.usage-bar-container { padding: 18px 22px; margin-bottom: 14px; }
+.usage-bar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.usage-bar-title { color: var(--text); font-size: 13px; font-weight: 600; letter-spacing: 0.01em; }
+.usage-bar-pct { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+.usage-bar-track { width: 100%; height: 10px; background: #0d1118; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.usage-bar-fill { height: 100%; border-radius: 999px; transition: width 0.6s cubic-bezier(0.22,1,0.36,1); position: relative; background: linear-gradient(90deg, var(--accent-strong), var(--accent)); }
+.usage-bar-fill::after { content: ""; position: absolute; inset: 0; border-radius: 999px; background: linear-gradient(180deg, rgba(255,255,255,0.25), transparent 55%); }
+.usage-bar-details { display: flex; justify-content: space-between; margin-top: 10px; font-size: 12px; color: var(--text-3); flex-wrap: wrap; gap: 6px; }
+.usage-bar-details .used { color: var(--text); font-family: var(--mono); }
+.goal-edit { background: none; border: none; color: var(--accent); font: inherit; font-family: var(--mono); cursor: pointer; padding: 0; border-bottom: 1px dotted var(--accent); }
+.goal-edit:hover { color: #fff; }
+.goal-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.usage-note { margin-top: 9px; font-size: 11.5px; color: var(--text-3); }
+.empty-state { padding: 6px 2px; color: var(--text-2); font-size: 13px; }
+.empty-hint { margin: -4px 0 18px; padding: 13px 16px; font-size: 13px; color: var(--text-2); background: rgba(217,119,87,0.07); border: 1px solid rgba(217,119,87,0.25); border-radius: var(--radius-sm); }
+.empty-hint[hidden] { display: none; }
 
 /* ── Cards ─────────────────────────────────────────────── */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 28px; }
-.card {
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 10px;
-  padding: 16px;
-}
-.card .label { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-.card .value { color: #f0f6fc; font-size: 26px; font-weight: 700; margin-top: 4px; }
-.card .sub { color: #8b949e; font-size: 12px; margin-top: 2px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 24px; }
+.card { padding: 16px 18px; position: relative; overflow: hidden; transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; }
+.card::before { content: ""; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: linear-gradient(180deg, var(--accent), transparent); opacity: 0.55; }
+.card:hover { transform: translateY(-2px); border-color: var(--border-strong); box-shadow: 0 14px 30px -18px rgba(0,0,0,0.8); }
+.card-top { display: flex; align-items: center; justify-content: space-between; }
+.card .label { color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+.card-ic { color: var(--text-3); width: 16px; height: 16px; opacity: 0.85; }
+.card .value { color: #fff; font-family: var(--mono); font-size: 27px; font-weight: 700; letter-spacing: -0.02em; margin-top: 8px; }
+.card .sub { color: var(--text-3); font-size: 12px; margin-top: 3px; }
 
 /* ── Chart ─────────────────────────────────────────────── */
-.chart-box {
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 10px;
-  padding: 20px;
-  margin-bottom: 28px;
+.chart-box { margin-bottom: 24px; position: relative; }
+canvas { width: 100% !important; display: block; }
+.chart-tip {
+  position: absolute; pointer-events: none; z-index: 20; opacity: 0;
+  transform: translate(-50%, -8px); transition: opacity 0.12s ease;
+  background: rgba(13,17,24,0.96); border: 1px solid var(--border-strong);
+  border-radius: 10px; padding: 9px 11px; font-size: 12px; min-width: 130px;
+  box-shadow: 0 10px 30px -8px rgba(0,0,0,0.8); backdrop-filter: blur(6px);
 }
-.chart-box h2 { color: #f0f6fc; font-size: 16px; margin-bottom: 12px; }
-canvas { width: 100% !important; }
+.chart-tip.show { opacity: 1; }
+.chart-tip .tip-day { color: var(--text-2); font-size: 11px; margin-bottom: 6px; font-family: var(--mono); }
+.chart-tip .tip-row { display: flex; align-items: center; gap: 7px; margin-top: 3px; }
+.chart-tip .tip-row .nm { color: var(--text-2); flex: 1; }
+.chart-tip .tip-row .vl { color: var(--text); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.chart-tip .tip-total { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; }
+.chart-tip .tip-total .nm { color: var(--text-3); } .chart-tip .tip-total .vl { color: #fff; font-family: var(--mono); font-weight: 600; }
 
-/* ── Range buttons ─────────────────────────────────────── */
-.range-bar { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+/* ── Segmented range control ───────────────────────────── */
+.range-bar { display: inline-flex; gap: 3px; margin-bottom: 14px; flex-wrap: wrap; background: #0d1118; border: 1px solid var(--border); border-radius: 11px; padding: 4px; }
 .range-bar button {
-  background: #21262d;
-  color: #8b949e;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  padding: 5px 12px;
-  font-size: 12px;
-  cursor: pointer;
+  background: transparent; color: var(--text-3); border: none; border-radius: 8px;
+  padding: 6px 13px; font-size: 12.5px; font-weight: 550; cursor: pointer; font-family: var(--sans);
+  transition: color 0.15s ease, background 0.15s ease;
 }
-.range-bar button.active { background: #d97757; color: #fff; border-color: #d97757; }
+.range-bar button:hover { color: var(--text); }
+.range-bar button.active { background: linear-gradient(180deg, var(--accent), var(--accent-strong)); color: #fff; box-shadow: 0 4px 12px -4px rgba(217,119,87,0.6); }
+.range-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── Tables ────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th { text-align: left; color: #8b949e; font-weight: 600; padding: 8px 10px; border-bottom: 1px solid #30363d; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-td { padding: 8px 10px; border-bottom: 1px solid #21262d; }
-tr:hover td { background: #1c2128; }
-.num { text-align: right; font-variant-numeric: tabular-nums; }
-.cost { color: #7ee787; }
-.muted { color: #8b949e; }
+th { text-align: left; color: var(--text-3); font-weight: 600; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+td { padding: 10px 12px; border-bottom: 1px solid rgba(35,42,53,0.6); color: var(--text-2); }
+tbody tr { transition: background 0.12s ease; }
+tbody tr:hover td { background: var(--surface-hover); }
+tbody tr:last-child td { border-bottom: none; }
+td:first-child { color: var(--text); font-weight: 500; }
+.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.cost { color: var(--green); }
+.muted { color: var(--text-3); }
 
 /* ── Expandable sessions ───────────────────────────────── */
 .group-row { cursor: pointer; }
-.group-row:hover td { background: #1c2128; }
 .group-row td:first-child { font-weight: 600; }
-.toggle { display: inline-block; width: 16px; font-size: 11px; color: #8b949e; transition: transform 0.15s; }
+.toggle { display: inline-block; width: 16px; font-size: 10px; color: var(--text-3); transition: transform 0.18s ease; }
 .toggle.open { transform: rotate(90deg); }
-.child-row td { padding-left: 30px; background: #13161d; }
-.child-row td:first-child { font-weight: 400; color: #8b949e; }
-.badge { display: inline-block; background: #21262d; color: #8b949e; font-size: 11px; padding: 1px 7px; border-radius: 10px; margin-left: 6px; font-weight: 400; }
+.child-row td { padding-left: 34px; background: rgba(10,12,16,0.5); }
+.child-row td:first-child { font-weight: 400; color: var(--text-3); font-family: var(--mono); font-size: 12px; }
+.badge { display: inline-block; background: var(--surface-hover); color: var(--text-2); font-size: 11px; padding: 1px 8px; border-radius: 999px; margin-left: 7px; font-weight: 500; border: 1px solid var(--border); }
 
 /* ── Legend ─────────────────────────────────────────────── */
-.legend { display: flex; gap: 16px; margin-bottom: 10px; flex-wrap: wrap; }
-.legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #8b949e; }
-.legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+.legend { display: flex; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+.legend-dot { width: 9px; height: 9px; border-radius: 3px; }
+
+@media (max-width: 640px) {
+  .panel-pad, .usage-bar-container { padding: 15px 16px; }
+  .card .value { font-size: 23px; }
+  table { font-size: 12px; }
+  th, td { padding: 8px 9px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
 </style>
 </head>
 <body>
-<h1>Claude Usage Dashboard</h1>
-<div class="subtitle" id="meta">Loading...</div>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2.5v19M2.5 12h19M5 5l14 14M19 5L5 19" stroke="#fff" stroke-width="2.1" stroke-linecap="round" opacity="0.95"/>
+      </svg>
+    </span>
+    <div>
+      <h1>Claude Usage</h1>
+      <div class="subtitle" id="meta" aria-live="polite">Loading…</div>
+    </div>
+  </div>
+  <div class="live"><span class="live-dot" id="liveDot"></span> <span>Auto-refresh 30s</span></div>
+</header>
 
-<div class="usage-bar-container" id="usageBar"></div>
+<div class="panel usage-bar-container" id="usageBar"></div>
+
+<div class="empty-hint" id="emptyHint" hidden></div>
 
 <div class="cards" id="cards"></div>
 
-<div class="chart-box">
-  <h2>Daily Output Tokens</h2>
-  <div class="range-bar" id="rangeBar"></div>
+<div class="chart-box panel panel-pad">
+  <div class="section-head"><h2>Daily Output Tokens</h2></div>
+  <div class="range-bar" id="rangeBar" role="tablist" aria-label="Time range"></div>
   <div class="legend" id="legend"></div>
-  <canvas id="chart" height="260"></canvas>
+  <canvas id="chart" height="280"></canvas>
+  <div class="chart-tip" id="chartTip"></div>
 </div>
 
-<div class="chart-box">
-  <h2 id="modelTableTitle">Model Breakdown</h2>
+<div class="panel panel-pad chart-box">
+  <div class="section-head"><h2 id="modelTableTitle">Model Breakdown</h2></div>
   <table id="modelTable"></table>
 </div>
 
-<div class="chart-box">
-  <h2 id="sessionTableTitle">Sessions</h2>
+<div class="panel panel-pad chart-box">
+  <div class="section-head"><h2 id="sessionTableTitle">Sessions</h2></div>
   <table id="sessionTable"></table>
 </div>
 
 <script>
-const DAILY_LIMIT = 250_000; // output tokens per day
+// Personal daily output-token GOAL (not a real Claude plan limit). User-settable, persisted.
+let DAILY_LIMIT = parseInt(localStorage.getItem('claudeDailyGoal') || '250000', 10) || 250000;
 
 const MODEL_COLORS = {
   'opus':   '#d97757',
@@ -320,19 +407,31 @@ function filterDays(dailyData, rangeKey) {
 }
 
 // ── Canvas chart drawing ─────────────────────────────────────────────────────
+function shade(hex, pct) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const t = pct < 0 ? 0 : 255, p = Math.abs(pct);
+  r = Math.round((t - r) * p + r); g = Math.round((t - g) * p + g); b = Math.round((t - b) * p + b);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+function niceCeil(v) {
+  if (v <= 0) return 1;
+  const exp = Math.floor(Math.log10(v)), base = Math.pow(10, exp), f = v / base;
+  const nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10;
+  return nf * base;
+}
+
 function drawChart(canvas, dailyData) {
   const ctx = canvas.getContext('2d');
+  const tip = document.getElementById('chartTip');
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.parentElement.getBoundingClientRect();
-  const W = rect.width - 40;
-  const H = 260;
+  const W = rect.width - 44;
+  const H = 280;
   canvas.width = W * dpr;
   canvas.height = H * dpr;
   canvas.style.width = W + 'px';
   canvas.style.height = H + 'px';
-  ctx.scale(dpr, dpr);
-
-  ctx.clearRect(0, 0, W, H);
 
   // Group by day
   const dayMap = {};
@@ -345,16 +444,17 @@ function drawChart(canvas, dailyData) {
 
   const days = Object.keys(dayMap).sort();
   if (days.length === 0) {
-    ctx.fillStyle = '#8b949e';
-    ctx.font = '14px sans-serif';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#788393';
+    ctx.font = '13px ' + getComputedStyle(document.body).fontFamily;
     ctx.textAlign = 'center';
-    ctx.fillText('No data for this range', W / 2, H / 2);
+    ctx.fillText('No data for this range yet', W / 2, H / 2);
+    canvas.onmousemove = null; canvas.onmouseleave = null;
     return;
   }
 
   const modelList = Array.from(models).sort();
-
-  // Stacked values
   const stacked = days.map(day => {
     let total = 0;
     const parts = modelList.map(m => {
@@ -365,43 +465,60 @@ function drawChart(canvas, dailyData) {
     return { day, parts, total };
   });
 
-  const maxVal = Math.max(...stacked.map(s => s.total), 1);
-
-  const padL = 58, padR = 16, padT = 10, padB = 44;
+  const maxVal = niceCeil(Math.max(...stacked.map(s => s.total), 1));
+  const padL = 56, padR = 14, padT = 12, padB = 42;
   const chartW = W - padL - padR;
   const chartH = H - padT - padB;
-  const barW = Math.max(2, Math.min(28, (chartW / days.length) - 2));
+  const barW = Math.max(3, Math.min(34, (chartW / days.length) - 6));
   const gap = (chartW - barW * days.length) / Math.max(days.length - 1, 1);
+  const ySteps = 4;
 
-  // Y-axis grid
-  const ySteps = 5;
-  ctx.strokeStyle = '#21262d';
-  ctx.lineWidth = 1;
-  ctx.fillStyle = '#8b949e';
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'right';
-  for (let i = 0; i <= ySteps; i++) {
-    const y = padT + chartH - (chartH * i / ySteps);
-    const val = maxVal * i / ySteps;
-    ctx.beginPath();
-    ctx.moveTo(padL, y);
-    ctx.lineTo(W - padR, y);
-    ctx.stroke();
-    ctx.fillText(fmt(val), padL - 6, y + 4);
-  }
+  function barX(i) { return padL + i * (barW + gap); }
 
-  // Bars (stacked)
-  stacked.forEach((s, i) => {
-    const x = padL + i * (barW + gap);
-    let yOffset = 0;
-    s.parts.forEach(p => {
-      const barH = (p.value / maxVal) * chartH;
-      ctx.fillStyle = colorFor(p.model);
+  function paint(hl) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    // Hover column highlight (behind everything)
+    if (hl >= 0 && hl < stacked.length) {
+      const cx = barX(hl) - gap / 2;
+      ctx.fillStyle = 'rgba(255,255,255,0.035)';
+      ctx.fillRect(cx, padT - 4, barW + gap, chartH + 4);
+    }
+
+    // Gridlines + y labels
+    ctx.font = '11px ' + getComputedStyle(document.body).fontFamily;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= ySteps; i++) {
+      const y = padT + chartH - (chartH * i / ySteps);
+      ctx.strokeStyle = i === 0 ? '#2d3542' : 'rgba(45,53,66,0.55)';
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      const y = padT + chartH - yOffset - barH;
-      // Rounded top corners for top segment
-      const r = Math.min(3, barW / 2, barH);
-      if (barH > 0) {
+      ctx.moveTo(padL, y + 0.5);
+      ctx.lineTo(W - padR, y + 0.5);
+      ctx.stroke();
+      ctx.fillStyle = '#788393';
+      ctx.fillText(fmt(maxVal * i / ySteps), padL - 10, y);
+    }
+
+    // Bars (stacked, gradient fill, rounded top)
+    stacked.forEach((s, i) => {
+      const x = barX(i);
+      const dim = (hl >= 0 && hl !== i);
+      let yOffset = 0;
+      s.parts.forEach(p => {
+        if (p.value <= 0) return;
+        const barH = (p.value / maxVal) * chartH;
+        const y = padT + chartH - yOffset - barH;
+        const base = colorFor(p.model);
+        const grad = ctx.createLinearGradient(0, y, 0, y + barH);
+        grad.addColorStop(0, shade(base, 0.18));
+        grad.addColorStop(1, base);
+        ctx.fillStyle = grad;
+        ctx.globalAlpha = dim ? 0.42 : 1;
+        const r = Math.min(4, barW / 2, barH);
+        ctx.beginPath();
         ctx.moveTo(x, y + r);
         ctx.arcTo(x, y, x + barW, y, r);
         ctx.arcTo(x + barW, y, x + barW, y + barH, r);
@@ -409,36 +526,47 @@ function drawChart(canvas, dailyData) {
         ctx.lineTo(x, y + barH);
         ctx.closePath();
         ctx.fill();
+        ctx.globalAlpha = 1;
+        yOffset += barH;
+      });
+
+      if (days.length <= 16 || i % Math.ceil(days.length / 16) === 0) {
+        ctx.fillStyle = '#788393';
+        ctx.font = '10px ' + getComputedStyle(document.body).fontFamily;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.save();
+        ctx.translate(x + barW / 2, padT + chartH + 9);
+        ctx.rotate(days.length > 22 ? -0.6 : 0);
+        ctx.fillText(s.day.slice(5), 0, 0);
+        ctx.restore();
       }
-      yOffset += barH;
     });
+  }
 
-    // X label (show subset)
-    if (days.length <= 14 || i % Math.ceil(days.length / 14) === 0) {
-      ctx.fillStyle = '#8b949e';
-      ctx.font = '10px sans-serif';
-      ctx.textAlign = 'center';
-      const label = s.day.slice(5); // MM-DD
-      ctx.save();
-      ctx.translate(x + barW / 2, padT + chartH + 8);
-      ctx.rotate(days.length > 20 ? -0.6 : 0);
-      ctx.fillText(label, 0, 10);
-      ctx.restore();
-    }
-  });
+  paint(-1);
 
-  // Tooltip on hover
   canvas.onmousemove = (e) => {
-    const rect2 = canvas.getBoundingClientRect();
-    const mx = (e.clientX - rect2.left);
-    const idx = Math.floor((mx - padL) / (barW + gap));
+    const r2 = canvas.getBoundingClientRect();
+    const mx = e.clientX - r2.left;
+    const idx = Math.round((mx - padL - barW / 2) / (barW + gap));
     if (idx >= 0 && idx < stacked.length) {
+      paint(idx);
       const s = stacked[idx];
-      canvas.title = s.day + ': ' + fmt(s.total) + ' output tokens';
+      const rows = s.parts.filter(p => p.value > 0).map(p =>
+        `<div class="tip-row"><span class="legend-dot" style="background:${colorFor(p.model)}"></span><span class="nm">${p.model}</span><span class="vl">${fmt(p.value)}</span></div>`
+      ).join('');
+      tip.innerHTML = `<div class="tip-day">${s.day}</div>${rows}<div class="tip-total"><span class="nm">Total</span><span class="vl">${fmt(s.total)}</span></div>`;
+      tip.classList.add('show');
+      const cx = barX(idx) + barW / 2 + 22;        // +22: canvas left padding within panel
+      tip.style.left = Math.min(cx, r2.width - 70) + 'px';
+      tip.style.top = (padT + 8) + 'px';
     } else {
-      canvas.title = '';
+      paint(-1);
+      tip.classList.remove('show');
     }
   };
+  canvas.onmouseleave = () => { paint(-1); tip.classList.remove('show'); };
 }
 
 // ── Build legend ─────────────────────────────────────────────────────────────
@@ -453,30 +581,57 @@ function buildLegend(models) {
 function buildRangeBar() {
   const el = document.getElementById('rangeBar');
   el.innerHTML = RANGES.map(r =>
-    `<button class="${r.key === selectedRange ? 'active' : ''}" onclick="setRange('${r.key}')">${r.label}</button>`
+    `<button role="tab" id="tab_${r.key}" aria-selected="${r.key === selectedRange}" tabindex="${r.key === selectedRange ? '0' : '-1'}" class="${r.key === selectedRange ? 'active' : ''}" onclick="setRange('${r.key}')">${r.label}</button>`
   ).join('');
 }
 
 function setRange(key) {
   selectedRange = key;
+  localStorage.setItem('claudeRange', key);
   buildRangeBar();
   render();
+}
+
+// Keyboard support for the range tablist (arrow keys + roving focus)
+function initTabKeys() {
+  document.getElementById('rangeBar').addEventListener('keydown', e => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    e.preventDefault();
+    const i = RANGES.findIndex(r => r.key === selectedRange);
+    const ni = e.key === 'ArrowRight' ? (i + 1) % RANGES.length : (i - 1 + RANGES.length) % RANGES.length;
+    setRange(RANGES[ni].key);
+    document.getElementById('tab_' + RANGES[ni].key)?.focus();
+  });
+}
+
+function setGoal() {
+  const v = prompt('Set your daily output-token goal:', DAILY_LIMIT);
+  if (v === null) return;
+  const n = parseInt(String(v).replace(/[^0-9]/g, ''), 10);
+  if (n > 0) { DAILY_LIMIT = n; localStorage.setItem('claudeDailyGoal', String(n)); render(); }
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function render() {
   if (!DATA) return;
 
-  // Usage bar
+  // First-run / empty-state hint
+  const hasData = (DATA.models_summary || []).length > 0;
+  const hint = document.getElementById('emptyHint');
+  if (!hasData) {
+    hint.hidden = false;
+    hint.textContent = 'No usage logged yet. Use Claude Code, then refresh — this reads logs from ~/.claude/projects.';
+  } else {
+    hint.hidden = true;
+  }
+
+  // Usage bar — personal daily output GOAL (not a Claude plan limit)
   const t = DATA.today || {};
   const todayOut = t.output || 0;
   const pct = Math.min(100, (todayOut / DAILY_LIMIT) * 100);
   const remaining = Math.max(0, DAILY_LIMIT - todayOut);
-  let barColor = '#7ee787'; // green
-  if (pct >= 80) barColor = '#f85149'; // red
-  else if (pct >= 50) barColor = '#d29922'; // yellow
 
-  // Estimate reset time (midnight local)
+  // Reset countdown to local midnight (matches the local 'today' grouping server-side)
   const now = new Date();
   const midnight = new Date(now);
   midnight.setHours(24, 0, 0, 0);
@@ -486,16 +641,17 @@ function render() {
 
   document.getElementById('usageBar').innerHTML = `
     <div class="usage-bar-header">
-      <span class="usage-bar-title">Today's Usage</span>
-      <span class="usage-bar-pct" style="color:${barColor}">${pct.toFixed(1)}%</span>
+      <span class="usage-bar-title">Daily Output Goal</span>
+      <span class="usage-bar-pct">${pct.toFixed(1)}%</span>
     </div>
     <div class="usage-bar-track">
-      <div class="usage-bar-fill" style="width:${pct}%;background:${barColor}"></div>
+      <div class="usage-bar-fill" style="width:${pct}%"></div>
     </div>
     <div class="usage-bar-details">
-      <span><span class="used">${fmt(todayOut)}</span> / ${fmt(DAILY_LIMIT)} output tokens</span>
-      <span>${fmt(remaining)} remaining · resets in ${hrsLeft}h ${minsLeft}m</span>
+      <span><span class="used">${fmt(todayOut)}</span> / <button class="goal-edit" onclick="setGoal()" title="Click to set your daily goal">${fmt(DAILY_LIMIT)}</button> output tokens today</span>
+      <span>${pct >= 100 ? 'Goal reached' : fmt(remaining) + ' to goal'} · new day in ${hrsLeft}h ${minsLeft}m</span>
     </div>
+    <div class="usage-note">A personal target you set — not a Claude plan limit. Click the number to change it.</div>
   `;
 
   // Cards
@@ -503,26 +659,32 @@ function render() {
   const totalCost = (DATA.models_summary || []).reduce((a, m) => a + m.cost, 0);
   const totalTurns = (DATA.models_summary || []).reduce((a, m) => a + m.turns, 0);
 
+  const IC = {
+    up: '<svg class="card-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>',
+    down: '<svg class="card-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7 7 17M15 17H7V9"/></svg>',
+    stack: '<svg class="card-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 17l9 5 9-5"/></svg>',
+    cost: '<svg class="card-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+  };
   document.getElementById('cards').innerHTML = `
-    <div class="card">
-      <div class="label">Today Output</div>
+    <div class="card panel">
+      <div class="card-top"><span class="label">Today Output</span>${IC.up}</div>
       <div class="value">${fmt(t.output || 0)}</div>
       <div class="sub">${fmt(t.turns || 0)} turns</div>
     </div>
-    <div class="card">
-      <div class="label">Today Input</div>
+    <div class="card panel">
+      <div class="card-top"><span class="label">Today Input</span>${IC.down}</div>
       <div class="value">${fmt(t.input || 0)}</div>
       <div class="sub">+ ${fmt(t.cache_read || 0)} cached</div>
     </div>
-    <div class="card">
-      <div class="label">All-Time Output</div>
+    <div class="card panel">
+      <div class="card-top"><span class="label">All-Time Output</span>${IC.stack}</div>
       <div class="value">${fmt(totalOut)}</div>
       <div class="sub">${fmt(totalTurns)} turns</div>
     </div>
-    <div class="card">
-      <div class="label">Est. API Cost</div>
-      <div class="value cost">${fmtCost(totalCost)}</div>
-      <div class="sub">all time</div>
+    <div class="card panel">
+      <div class="card-top"><span class="label">Est. API Cost</span>${IC.cost}</div>
+      <div class="value" title="What this usage would cost at Anthropic API rates. NOT your actual bill if you're on a Pro or Max subscription.">${fmtCost(totalCost)}</div>
+      <div class="sub">if billed at API rates</div>
     </div>
   `;
 
@@ -544,17 +706,25 @@ function render() {
     m.turns += d.turns || 0;
   });
   const mt = Object.values(modelMap).sort((a, b) => b.output - a.output);
+  const PRICING = DATA.pricing || {};   // single source of truth, shipped from the server
+  let unpriced = 0;
   mt.forEach(m => {
     const tier = m.model.toLowerCase();
-    let p = null;
-    if (tier.includes('opus'))   p = { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 };
-    if (tier.includes('sonnet')) p = { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 };
-    if (tier.includes('haiku'))  p = { input: 1, output: 5, cache_read: 0.1, cache_write: 1.25 };
+    const key = tier.includes('opus') ? 'opus' : tier.includes('sonnet') ? 'sonnet' : tier.includes('haiku') ? 'haiku' : null;
+    const p = key ? PRICING[key] : null;
     m.cost = p ? (m.input * p.input + m.output * p.output + m.cache_read * p.cache_read + m.cache_write * p.cache_write) / 1_000_000 : 0;
+    if (!p && (m.output || m.input)) unpriced++;
   });
 
   const rangeLabel = RANGES.find(r => r.key === selectedRange)?.label || selectedRange;
-  document.getElementById('modelTableTitle').textContent = 'Model Breakdown (' + rangeLabel + ')';
+  document.getElementById('modelTableTitle').textContent = 'Model Breakdown (' + rangeLabel + ')'
+    + (unpriced ? ' · ' + unpriced + ' model' + (unpriced > 1 ? 's' : '') + ' not priced' : '');
+
+  // Accessible chart summary (canvas is otherwise invisible to screen readers)
+  const chartTotal = filtered.reduce((a, d) => a + (d.output || 0), 0);
+  const cv = document.getElementById('chart');
+  cv.setAttribute('role', 'img');
+  cv.setAttribute('aria-label', `Daily output tokens, ${rangeLabel}: ${fmt(chartTotal)} across ${models.length} model${models.length === 1 ? '' : 's'}. Exact values in the Model Breakdown table below.`);
 
   document.getElementById('modelTable').innerHTML = `
     <thead><tr>
@@ -621,7 +791,7 @@ function render() {
       </tr>`;
     } else {
       // Group header
-      sessionRows += `<tr class="group-row" onclick="toggleGroup('${gid}')">
+      sessionRows += `<tr class="group-row" role="button" tabindex="0" aria-expanded="false" onclick="toggleGroup('${gid}', this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleGroup('${gid}', this);}">
         <td><span class="toggle" id="tgl_${gid}">\u25B6</span>${esc(proj)}<span class="badge">${items.length}</span></td>
         <td>${esc(topModel)}</td>
         <td class="num">${totalTurns}</td>
@@ -649,15 +819,16 @@ function render() {
     <tbody>${sessionRows}</tbody>
   `;
 
-  document.getElementById('meta').textContent = 'Updated: ' + DATA.generated_at + ' · Auto-refresh 30s';
+  document.getElementById('meta').textContent = 'Updated ' + DATA.generated_at;
 }
 
-function toggleGroup(gid) {
+function toggleGroup(gid, rowEl) {
   const rows = document.querySelectorAll('.' + gid);
   const tgl = document.getElementById('tgl_' + gid);
   const visible = rows[0]?.style.display !== 'none';
   rows.forEach(r => r.style.display = visible ? 'none' : '');
   if (tgl) tgl.classList.toggle('open', !visible);
+  if (rowEl) rowEl.setAttribute('aria-expanded', String(!visible));
 }
 
 function esc(s) {
@@ -666,23 +837,36 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function setDot(state) {
+  const dot = document.getElementById('liveDot');
+  if (dot) dot.className = 'live-dot ' + state;
+}
+
 async function loadData() {
+  setDot('refreshing');
   try {
     const resp = await fetch('/api/data');
     DATA = await resp.json();
     if (DATA.error) {
-      document.body.innerHTML = '<div style="padding:40px;color:#f87171">' + esc(DATA.error) + '</div>';
+      document.getElementById('usageBar').innerHTML = '<div class="empty-state">' + esc(DATA.error) + '</div>';
+      document.getElementById('cards').innerHTML = '';
+      document.getElementById('meta').textContent = 'No data yet';
+      setDot('error');
       return;
     }
     render();
+    setDot('ok');
   } catch (e) {
     console.error('Failed to load data:', e);
-    document.getElementById('meta').textContent = 'Error loading data. Is the server running?';
+    document.getElementById('meta').textContent = 'Error loading data — is the server running?';
+    setDot('error');
   }
 }
 
 window.addEventListener('resize', () => { if (DATA) render(); });
+selectedRange = localStorage.getItem('claudeRange') || selectedRange;
 buildRangeBar();
+initTabKeys();
 loadData();
 setInterval(loadData, 30000);
 </script>
