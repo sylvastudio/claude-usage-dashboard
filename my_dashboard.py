@@ -303,6 +303,8 @@ td:first-child { color: var(--text); font-weight: 500; }
 
 /* ── Modal (native <dialog>) ───────────────────────────── */
 .modal {
+  position: fixed; inset: 0; margin: auto;            /* center both axes (reset zeroed the UA margin:auto) */
+  height: fit-content; max-height: calc(100vh - 32px);
   border: 1px solid var(--border-strong); padding: 0; color: var(--text);
   background: linear-gradient(180deg, var(--surface-2), var(--surface));
   border-radius: var(--radius); width: min(92vw, 400px);
