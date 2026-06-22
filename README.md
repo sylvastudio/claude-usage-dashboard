@@ -63,6 +63,21 @@ The scanner is incremental — it tracks each file's path and modification time,
 
 ---
 
+## Using the dashboard
+
+Once it's open in your browser, here's what each part does:
+
+- **Daily Output Goal** (top bar) — your progress toward a personal daily output-token target. This is **not** a Claude plan limit; it's just a benchmark for the progress bar. **Click the number to set your own goal** — a dialog opens and your choice is saved in the browser for next time. The countdown shows when your local day rolls over.
+- **Stat cards** — Today's output/input tokens, all-time output, and an estimated API cost. "Today" follows your **local** calendar day.
+- **Daily Output Tokens** chart — a stacked bar chart of output tokens per day, colored by model. **Hover a bar** for the exact per-model breakdown. Use the **range tabs** (Today / 7 / 14 / 30 / 90 Days / All Time) to zoom in or out — the tabs are keyboard-navigable with the arrow keys, and your choice is remembered.
+- **Model Breakdown** — totals per model for the selected range (output, input, cache read/write, turns, and estimated cost). Models without known pricing are marked `n/a` and flagged in the heading.
+- **Sessions** — your sessions grouped by project, newest first. **Click a project row** (or press Enter/Space when focused) to expand its individual sessions.
+- **Live status** — the dashboard re-scans and refreshes every 30 seconds. The dot by "Auto-refresh" turns amber while refreshing, green on success, and red if it can't reach the server.
+
+To stop the dashboard, press `Ctrl+C` in the terminal where it's running.
+
+---
+
 ## How it works
 
 Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each line is a JSON record; `assistant`-type records contain:
