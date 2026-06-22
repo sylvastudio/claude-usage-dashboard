@@ -9,8 +9,6 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 
 The dashboard ships as a **single Python file** (`my_dashboard.py`). No `pip install`, no Node, no external JS libraries — the charts are drawn with the HTML Canvas API and the HTML/CSS/JS is inlined directly in the server.
 
-![Claude Usage Dashboard](docs/screenshot.png)
-
 ---
 
 ## What this tracks
